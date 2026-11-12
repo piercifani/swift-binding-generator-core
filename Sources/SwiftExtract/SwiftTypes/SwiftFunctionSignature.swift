@@ -164,6 +164,7 @@ extension SwiftFunctionSignature {
       genericParameters: genericParams,
       genericRequirements: genericRequirements
     )
+    self.spellBareProtocolsAsExistentials()
   }
 
   public init(
@@ -171,8 +172,14 @@ extension SwiftFunctionSignature {
     enclosingType: SwiftType,
     lookupContext: SwiftTypeLookupContext
   ) throws {
+    // An associated value is stored in the enum, so a closure payload is always escaping.
     let parameters = try node.parameterClause?.parameters.map { param in
-      try SwiftParameter(param, lookupContext: lookupContext)
+      var parameter = try SwiftParameter(param, lookupContext: lookupContext)
+      if case .function(var functionType) = parameter.type {
+        functionType.isEscaping = true
+        parameter.type = .function(functionType)
+      }
+      return parameter
     }
 
     self.init(
@@ -239,7 +246,8 @@ extension SwiftFunctionSignature {
     if let resultType = node.signature.returnClause?.type {
       result = try SwiftResult(
         convention: .direct,
-        type: SwiftType(resultType, lookupContext: lookupContext)
+        type: Self.concreteSelfType(resultType, enclosingType: enclosingType, lookupContext: lookupContext)
+          ?? SwiftType(resultType, lookupContext: lookupContext)
       )
     } else {
       result = .void
@@ -263,6 +271,28 @@ extension SwiftFunctionSignature {
       }
 
     self.isDistributed = node.modifiers.contains { $0.name.tokenKind == .keyword(.distributed) }
+    self.spellBareProtocolsAsExistentials()
+  }
+
+  /// `Self` or `Self?` as a result of a struct's, an enum's or a class's member: the type itself. In a
+  /// protocol, `Self` is the conforming type, which isn't known.
+  static func concreteSelfType(
+    _ type: TypeSyntax,
+    enclosingType: SwiftType?,
+    lookupContext: SwiftTypeLookupContext
+  ) -> SwiftType? {
+    guard let enclosingType, case .nominal(let nominal) = enclosingType, !nominal.isProtocol else {
+      return nil
+    }
+    if let identifier = type.as(IdentifierTypeSyntax.self), identifier.name.text == "Self" {
+      return enclosingType
+    }
+    if let optional = type.as(OptionalTypeSyntax.self),
+      let identifier = optional.wrappedType.as(IdentifierTypeSyntax.self), identifier.name.text == "Self"
+    {
+      return SwiftKnownTypes(symbolTable: lookupContext.symbolTable).optionalSugar(enclosingType)
+    }
+    return nil
   }
 
   public static func translateGenericParameters(
@@ -352,6 +382,95 @@ extension SwiftFunctionSignature {
     return (parameters, effectSpecifiers, thrownTypedError)
   }
 
+  /// The type of an unannotated variable, when its initializer makes it unambiguous without type
+  /// checking: a literal (`42`, `-1`, `1.5`, `"text"`, `true`), or an initializer call `T(...)` /
+  /// `A.B(...)` whose callee resolves to a nominal type. Anything else, such as `T.member` or
+  /// `makeValue()`, still needs an explicit annotation.
+  static func inferredType(
+    of expr: ExprSyntax,
+    enclosingType: SwiftType? = nil,
+    lookupContext: SwiftTypeLookupContext
+  ) -> SwiftType? {
+    let knownTypes = SwiftKnownTypes(symbolTable: lookupContext.symbolTable)
+    if expr.is(IntegerLiteralExprSyntax.self) {
+      return knownTypes.int
+    }
+    if let prefix = expr.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "-",
+      prefix.expression.is(IntegerLiteralExprSyntax.self)
+    {
+      return knownTypes.int
+    }
+    if expr.is(FloatLiteralExprSyntax.self) {
+      return knownTypes.double
+    }
+    if expr.is(StringLiteralExprSyntax.self) {
+      return knownTypes.string
+    }
+    if expr.is(BooleanLiteralExprSyntax.self) {
+      return knownTypes.bool
+    }
+    // `Type(...)`
+    if let call = expr.as(FunctionCallExprSyntax.self),
+      let type = namedType(call.calledExpression, enclosingType: enclosingType, lookupContext: lookupContext)
+    {
+      return type
+    }
+    // `Type.member`, an enum case or a static property of the type itself.
+    if let member = expr.as(MemberAccessExprSyntax.self), let base = member.base,
+      let type = namedType(base, enclosingType: enclosingType, lookupContext: lookupContext),
+      case .nominal(let nominal) = type,
+      nominal.nominalTypeDecl.hasMemberOfItsOwnType(named: member.declName.baseName.text)
+    {
+      return type
+    }
+    return nil
+  }
+
+  /// The nominal type an expression names: `Foo` or `A.B`, looked up in the enclosing type first.
+  private static func namedType(
+    _ expr: ExprSyntax,
+    enclosingType: SwiftType?,
+    lookupContext: SwiftTypeLookupContext
+  ) -> SwiftType? {
+    if let reference = expr.as(DeclReferenceExprSyntax.self), reference.baseName.tokenKind == .keyword(.Self),
+      case .nominal(let enclosing) = enclosingType, !enclosing.isProtocol
+    {
+      return enclosingType
+    }
+    if let reference = expr.as(DeclReferenceExprSyntax.self), reference.argumentNames == nil,
+      case .nominal(let enclosing) = enclosingType
+    {
+      var scope: SwiftNominalTypeDeclaration? = enclosing.nominalTypeDecl
+      while let parent = scope {
+        if let nested = lookupContext.symbolTable.lookupNestedType(reference.baseName.text, parent: parent) {
+          return .nominal(SwiftNominalType(nominalTypeDecl: nested))
+        }
+        scope = parent.parent
+      }
+    }
+    guard let typeSyntax = typeSyntax(naming: expr),
+      let type = try? SwiftType(typeSyntax, lookupContext: lookupContext),
+      case .nominal = type, !type.isUnresolvedTypePlaceholder
+    else {
+      return nil
+    }
+    return type
+  }
+
+  /// `Foo` or `A.B` written as an expression, as a type.
+  private static func typeSyntax(naming expr: ExprSyntax) -> TypeSyntax? {
+    if let reference = expr.as(DeclReferenceExprSyntax.self), reference.argumentNames == nil {
+      return TypeSyntax(IdentifierTypeSyntax(name: reference.baseName.trimmed))
+    }
+    if let member = expr.as(MemberAccessExprSyntax.self), let base = member.base,
+      member.declName.argumentNames == nil,
+      let baseType = typeSyntax(naming: base)
+    {
+      return TypeSyntax(MemberTypeSyntax(baseType: baseType, name: member.declName.baseName.trimmed))
+    }
+    return nil
+  }
+
   public init(
     _ varNode: VariableDeclSyntax,
     isSet: Bool,
@@ -369,10 +488,16 @@ extension SwiftFunctionSignature {
       throw SwiftFunctionTranslationError.multipleBindings(varNode)
     }
 
-    guard let varTypeNode = binding.typeAnnotation?.type else {
+    let valueType: SwiftType
+    if let varTypeNode = binding.typeAnnotation?.type {
+      valueType = try SwiftType(varTypeNode, lookupContext: lookupContext)
+    } else if let initializer = binding.initializer?.value,
+      let inferred = Self.inferredType(of: initializer, enclosingType: enclosingType, lookupContext: lookupContext)
+    {
+      valueType = inferred
+    } else {
       throw SwiftFunctionTranslationError.missingTypeAnnotation(varNode)
     }
-    let valueType = try SwiftType(varTypeNode, lookupContext: lookupContext)
 
     var accessorEffects: AccessorEffects? = nil
     switch binding.accessorBlock?.accessors {
@@ -392,8 +517,14 @@ extension SwiftFunctionSignature {
     self.thrownTypedError = accessorEffects?.thrownTypedError
 
     if isSet {
+      // A closure stored in a variable is always escaping, so its setter's `newValue` is too.
+      var newValueType = valueType
+      if case .function(var functionType) = valueType {
+        functionType.isEscaping = true
+        newValueType = .function(functionType)
+      }
       self.parameters = [
-        SwiftParameter(convention: .byValue, parameterName: "newValue", type: valueType)
+        SwiftParameter(convention: .byValue, parameterName: "newValue", type: newValueType)
       ]
       self.result = .void
     } else {
@@ -402,6 +533,7 @@ extension SwiftFunctionSignature {
     }
     self.genericParameters = []
     self.genericRequirements = []
+    self.spellBareProtocolsAsExistentials()
   }
 
   public init(
@@ -459,6 +591,15 @@ extension SwiftFunctionSignature {
     self.parameters = nodeParameters
     self.genericParameters = []
     self.genericRequirements = []
+    self.spellBareProtocolsAsExistentials()
+  }
+
+  /// A bare protocol in a parameter or result type is an existential (`any P`), not a concrete type.
+  private mutating func spellBareProtocolsAsExistentials() {
+    for index in parameters.indices {
+      parameters[index].type = parameters[index].type.existentialForBareProtocols
+    }
+    result.type = result.type.existentialForBareProtocols
   }
 
   struct AccessorEffects {
@@ -604,4 +745,34 @@ public enum SwiftFunctionTranslationError: Error {
   case genericParameterSpecifier(GenericParameterSyntax)
   case expressionInGenericRequirement(GenericRequirementSyntax)
   case layoutRequirement(GenericRequirementSyntax)
+}
+
+extension SwiftNominalTypeDeclaration {
+  /// Whether `name` is a case of this enum, or a static property of this type whose type is the type itself:
+  /// declared `Self` or the type's name, or initialized with `Self(...)`, `Name(...)` or `.init(...)`.
+  func hasMemberOfItsOwnType(named name: String) -> Bool {
+    for member in syntax.memberBlock.members {
+      if let cases = member.decl.as(EnumCaseDeclSyntax.self),
+        cases.elements.contains(where: { $0.name.text == name })
+      {
+        return true
+      }
+      guard let variable = member.decl.as(VariableDeclSyntax.self),
+        variable.modifiers.contains(where: { $0.name.tokenKind == .keyword(.static) })
+      else {
+        continue
+      }
+      for binding in variable.bindings where binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == name {
+        if let annotation = binding.typeAnnotation?.type.trimmedDescription {
+          return annotation == "Self" || annotation == self.name
+        }
+        guard let call = binding.initializer?.value.as(FunctionCallExprSyntax.self) else {
+          return false
+        }
+        let callee = call.calledExpression.trimmedDescription
+        return callee == "Self" || callee == self.name || callee == ".init"
+      }
+    }
+    return false
+  }
 }

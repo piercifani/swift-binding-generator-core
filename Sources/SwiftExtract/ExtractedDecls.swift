@@ -49,11 +49,25 @@ public final class ExtractedNominalType: ExtractedSwiftDecl {
     self.swiftNominal.sourceFilePath
   }
 
+  /// The file whose `+SwiftJava.swift` output holds this type's thunks: the one declaring it or, for a
+  /// type another module declares, the first file in `swiftModuleName` that extends it. A build expects
+  /// one output per input file of `swiftModuleName`, so a name from another module would not be built.
+  public func thunkSourceFilePath(swiftModuleName: String) -> String {
+    guard swiftNominal.moduleName != swiftModuleName else {
+      return sourceFilePath
+    }
+    let members = initializers + methods + variables
+    return members.lazy.compactMap(\.sourceFilePath).first ?? sourceFilePath
+  }
+
   // Backing storage for member collections
   public var initializers: [ExtractedFunc] = []
   public var methods: [ExtractedFunc] = []
   public var variables: [ExtractedFunc] = []
   public var cases: [ExtractedEnumCase] = []
+  /// For a protocol, the members its extensions implement, exported or not: `name` for a property,
+  /// `name(label:)` for a method.
+  public var protocolExtensionMembers: Set<String> = []
   public var inheritedTypes: [SwiftType]
   public var parent: SwiftNominalTypeDeclaration?
 
@@ -492,6 +506,68 @@ public final class ExtractedFunc: ExtractedSwiftDecl, CustomStringConvertible {
     }
 
     return overloads
+  }
+
+  /// Overloads that leave out this function's trailing defaulted parameters, longest first, for
+  /// callers without default arguments. Swift fills in the values they leave out.
+  ///
+  /// A method whose result may need a `SwiftArena` also gets an overload ending in one, which a
+  /// Kotlin lambda converts to. So an overload is left out when the parameter after its last one is
+  /// a closure and the overload with that closure exists: `f(a, SwiftArena)` would be ambiguous with
+  /// `f(a, closure)`.
+  public func defaultArgumentOverloads() -> [ExtractedFunc] {
+    let parameters = functionSignature.parameters
+    let mayTakeArena = apiKind == .initializer || Self.resultMayNeedArena(functionSignature.result.type)
+    var overloads: [ExtractedFunc] = []
+    var count = parameters.count
+    var longerOverloadExists = true
+    while count > 0, parameters[count - 1].hasDefaultValue {
+      count -= 1
+      if mayTakeArena, longerOverloadExists, case .function = parameters[count].type {
+        longerOverloadExists = false
+        continue
+      }
+      longerOverloadExists = true
+      var signature = functionSignature
+      signature.parameters = Array(parameters.prefix(count))
+      overloads.append(
+        ExtractedFunc(
+          module: module,
+          swiftDecl: swiftDecl,
+          name: name,
+          apiKind: apiKind,
+          functionSignature: signature,
+          sourceFilePath: sourceFilePath
+        )
+      )
+    }
+    return overloads
+  }
+
+  /// Whether a result may be returned through a `SwiftArena`: anything but primitives, strings and
+  /// `Void`, or optionals and arrays of them.
+  private static func resultMayNeedArena(_ type: SwiftType) -> Bool {
+    switch type {
+    case .nominal(let nominal):
+      switch nominal.asKnownType {
+      case .bool, .int, .uint, .int8, .uint8, .int16, .uint16, .int32, .uint32, .int64, .uint64, .float, .double,
+        .string:
+        return false
+      case .optional(let wrapped), .array(let wrapped):
+        return resultMayNeedArena(wrapped)
+      default:
+        return true
+      }
+    case .tuple(let elements):
+      return elements.contains { resultMayNeedArena($0.type) }
+    default:
+      return true
+    }
+  }
+
+  /// Identifies an overload by name and parameter types, as Java does.
+  var overloadKey: String {
+    "\(name)(\(functionSignature.parameters.map { "\($0.type)" }.joined(separator: ",")))"
   }
 }
 

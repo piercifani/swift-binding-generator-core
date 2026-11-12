@@ -24,6 +24,12 @@ public struct SwiftFunctionType: Equatable {
   public var parameters: [SwiftParameter]
   public var resultType: SwiftType
   public var isEscaping: Bool = false
+  /// Whether the function type is marked `@Sendable`.
+  public var isSendable: Bool = false
+  /// Whether the function type is isolated to the main actor (`@MainActor`).
+  public var isMainActorIsolated: Bool = false
+  /// `@autoclosure`: a call passes an expression of the result type, not a closure.
+  public var isAutoclosure: Bool = false
 
   public var effectSpecifiers: [SwiftEffectSpecifier] = []
 
@@ -58,7 +64,10 @@ extension SwiftFunctionType: CustomStringConvertible {
       case .c: "@convention(c) "
       case .swift: ""
       }
-    let escapingPrefix = isEscaping ? "@escaping " : ""
+    let escapingPrefix =
+      (isEscaping ? "@escaping " : "")
+      + (isSendable ? "@Sendable " : "")
+      + (isMainActorIsolated ? "@MainActor " : "")
     let throwsString =
       switch (isThrowing, thrownTypedError) {
       case (true, .some(let errorType)): " throws(\(errorType.description))"
