@@ -43,6 +43,8 @@ public enum SwiftKnownType: Equatable {
   case array(_ element: SwiftType)
   case dictionary(_ key: SwiftType, _ value: SwiftType)
   case set(_ element: SwiftType)
+  case asyncStream(_ element: SwiftType)
+  case asyncThrowingStream(_ element: SwiftType)
 
   // Foundation
   case foundationDataProtocol
@@ -55,9 +57,16 @@ public enum SwiftKnownType: Equatable {
   case essentialsUUID
   case foundationURL
   case essentialsURL
+  case error
+  case foundationLocale
+  case essentialsLocale
+  case foundationTimeZone
+  case essentialsTimeZone
+  case foundationCGFloat
 
   public init?(kind: SwiftKnownTypeDeclKind, genericArguments: [SwiftType]?) {
     switch kind {
+    case .error: self = .error
     case .bool: self = .bool
     case .int: self = .int
     case .uint: self = .uint
@@ -102,6 +111,12 @@ public enum SwiftKnownType: Equatable {
     case .set:
       guard let arg = genericArguments?.first else { return nil }
       self = .set(arg)
+    case .asyncStream:
+      guard let arg = genericArguments?.first else { return nil }
+      self = .asyncStream(arg)
+    case .asyncThrowingStream:
+      guard let arg = genericArguments?.first else { return nil }
+      self = .asyncThrowingStream(arg)
     case .foundationDataProtocol: self = .foundationDataProtocol
     case .essentialsDataProtocol: self = .essentialsDataProtocol
     case .foundationData: self = .foundationData
@@ -112,6 +127,11 @@ public enum SwiftKnownType: Equatable {
     case .essentialsUUID: self = .essentialsUUID
     case .foundationURL: self = .foundationURL
     case .essentialsURL: self = .essentialsURL
+    case .foundationLocale: self = .foundationLocale
+    case .essentialsLocale: self = .essentialsLocale
+    case .foundationTimeZone: self = .foundationTimeZone
+    case .essentialsTimeZone: self = .essentialsTimeZone
+    case .foundationCGFloat: self = .foundationCGFloat
     }
   }
 
@@ -145,6 +165,8 @@ public enum SwiftKnownType: Equatable {
     case .array: .array
     case .dictionary: .dictionary
     case .set: .set
+    case .asyncStream: .asyncStream
+    case .asyncThrowingStream: .asyncThrowingStream
     case .foundationDataProtocol: .foundationDataProtocol
     case .essentialsDataProtocol: .essentialsDataProtocol
     case .foundationData: .foundationData
@@ -155,6 +177,12 @@ public enum SwiftKnownType: Equatable {
     case .essentialsUUID: .essentialsUUID
     case .foundationURL: .foundationURL
     case .essentialsURL: .essentialsURL
+    case .error: .error
+    case .foundationLocale: .foundationLocale
+    case .essentialsLocale: .essentialsLocale
+    case .foundationTimeZone: .foundationTimeZone
+    case .essentialsTimeZone: .essentialsTimeZone
+    case .foundationCGFloat: .foundationCGFloat
     }
   }
 }
@@ -189,6 +217,9 @@ public enum SwiftKnownTypeDeclKind: String, Hashable {
   case array = "Swift.Array"
   case dictionary = "Swift.Dictionary"
   case set = "Swift.Set"
+  case asyncStream = "Swift.AsyncStream"
+  case asyncThrowingStream = "Swift.AsyncThrowingStream"
+  case error = "Swift.Error"
 
   // Foundation
   case foundationDataProtocol = "Foundation.DataProtocol"
@@ -201,6 +232,11 @@ public enum SwiftKnownTypeDeclKind: String, Hashable {
   case essentialsUUID = "FoundationEssentials.UUID"
   case foundationURL = "Foundation.URL"
   case essentialsURL = "FoundationEssentials.URL"
+  case foundationLocale = "Foundation.Locale"
+  case essentialsLocale = "FoundationEssentials.Locale"
+  case foundationTimeZone = "Foundation.TimeZone"
+  case essentialsTimeZone = "FoundationEssentials.TimeZone"
+  case foundationCGFloat = "Foundation.CGFloat"
 
   public var moduleAndName: (module: String, name: String) {
     let qualified = self.rawValue

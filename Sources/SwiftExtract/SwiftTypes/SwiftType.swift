@@ -102,6 +102,18 @@ public enum SwiftType: Equatable {
     }
   }
 
+  /// Whether this is `Error` or `any Error`: a Swift error of any type.
+  public var isSwiftError: Bool {
+    switch self {
+    case .nominal(let nominal):
+      return nominal.nominalTypeDecl.knownTypeKind == .error
+    case .existential(let constraint):
+      return constraint.isSwiftError
+    default:
+      return false
+    }
+  }
+
   public var isBoolean: Bool {
     if case let .nominal(nominal) = self {
       return nominal.nominalTypeDecl.knownTypeKind == .bool
@@ -344,6 +356,41 @@ extension SwiftNominalType {
 }
 
 extension SwiftType {
+  /// This type with every bare protocol in value position spelled as an existential. In a parameter,
+  /// result or property type, `P` means `any P`; Swift 5 mode lets the `any` be omitted.
+  public var existentialForBareProtocols: SwiftType {
+    switch self {
+    case .nominal(let nominal) where nominal.isProtocol:
+      return .existential(self)
+    case .nominal(let nominal):
+      guard !nominal.genericArguments.isEmpty else { return self }
+      return .nominal(
+        SwiftNominalType(
+          parent: nominal.parent,
+          sugarName: nominal.sugarName,
+          nominalTypeDecl: nominal.nominalTypeDecl,
+          genericArguments: nominal.genericArguments.map(\.existentialForBareProtocols)
+        )
+      )
+    case .function(var fn):
+      fn.parameters = fn.parameters.map { p in
+        var p = p
+        p.type = p.type.existentialForBareProtocols
+        return p
+      }
+      fn.resultType = fn.resultType.existentialForBareProtocols
+      return .function(fn)
+    case .tuple(let elements):
+      return .tuple(elements.map { SwiftTupleElement(label: $0.label, type: $0.type.existentialForBareProtocols) })
+    case .inlineArray(let count, let element):
+      return .inlineArray(count: count, element: element.existentialForBareProtocols)
+    case .metatype, .existential, .opaque, .composite, .genericParameter:
+      return self
+    }
+  }
+}
+
+extension SwiftType {
   public static func thrownTypedError(
     from throwsClause: ThrowsClauseSyntax?,
     lookupContext: SwiftTypeLookupContext
@@ -379,38 +426,41 @@ extension SwiftType {
       self = .inlineArray(count: count, element: elementType)
 
     case .attributedType(let attributedType):
-      // Recognize "@convention(c)", "@convention(swift)", and "@escaping" attributes on function types.
-      // FIXME: This string matching is a horrible hack.
-      let attrs = attributedType.attributes.trimmedDescription
-
-      // Handle @escaping attribute
-      if attrs.contains("@escaping") {
-        let innerType = try SwiftType(attributedType.baseType, lookupContext: lookupContext)
-        switch innerType {
-        case .function(var functionType):
-          functionType.isEscaping = true
-          self = .function(functionType)
-        default:
+      // Recognize the attributes jextract understands on function types:
+      // `@escaping`, `@Sendable`, `@MainActor`, and `@convention(c|swift)`.
+      guard case .function(var functionType) = try SwiftType(attributedType.baseType, lookupContext: lookupContext)
+      else {
+        throw TypeTranslationError.unimplementedType(type)
+      }
+      var hasUnknownAttribute = false
+      for element in attributedType.attributes {
+        guard let attribute = element.as(AttributeSyntax.self) else {
           throw TypeTranslationError.unimplementedType(type)
         }
-      } else {
-        // Handle @convention attributes
-        switch attrs {
-        case "@convention(c)", "@convention(swift)":
-          let innerType = try SwiftType(attributedType.baseType, lookupContext: lookupContext)
-          switch innerType {
-          case .function(var functionType):
-            let isConventionC = attrs == "@convention(c)"
-            let convention: SwiftFunctionType.Convention = isConventionC ? .c : .swift
-            functionType.convention = convention
-            self = .function(functionType)
-          default:
-            throw TypeTranslationError.unimplementedType(type)
+        switch attribute.attributeName.trimmedDescription {
+        case "escaping":
+          functionType.isEscaping = true
+        case "autoclosure":
+          functionType.isAutoclosure = true
+        case "Sendable":
+          functionType.isSendable = true
+        case "MainActor", "_Concurrency.MainActor":
+          functionType.isMainActorIsolated = true
+        case "convention":
+          switch attribute.arguments?.trimmedDescription {
+          case "c": functionType.convention = .c
+          case "swift": functionType.convention = .swift
+          default: throw TypeTranslationError.unimplementedType(type)
           }
         default:
-          throw TypeTranslationError.unimplementedType(type)
+          hasUnknownAttribute = true
         }
       }
+      // Other attributes were previously tolerated next to `@escaping`; keep that behavior.
+      if hasUnknownAttribute && !functionType.isEscaping {
+        throw TypeTranslationError.unimplementedType(type)
+      }
+      self = .function(functionType)
 
     case .functionType(let functionType):
       self = .function(
@@ -512,6 +562,13 @@ extension SwiftType {
       self = knownTypes.optionalSugar(try SwiftType(optionalType.wrappedType, lookupContext: lookupContext))
 
     case .tupleType(let tupleType):
+      // `(T)` is `T` in parentheses, not a tuple: `((Item) -> Void)?` is an optional closure.
+      if tupleType.elements.count == 1, let element = tupleType.elements.first, element.firstName == nil,
+        element.ellipsis == nil
+      {
+        self = try SwiftType(element.type, lookupContext: lookupContext)
+        return
+      }
       self = try .tuple(
         tupleType.elements.map { element in
           SwiftTupleElement(
