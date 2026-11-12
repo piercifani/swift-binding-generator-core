@@ -102,6 +102,18 @@ public enum SwiftType: Equatable {
     }
   }
 
+  /// Whether this is `Error` or `any Error`: a Swift error of any type.
+  public var isSwiftError: Bool {
+    switch self {
+    case .nominal(let nominal):
+      return nominal.nominalTypeDecl.knownTypeKind == .error
+    case .existential(let constraint):
+      return constraint.isSwiftError
+    default:
+      return false
+    }
+  }
+
   public var isBoolean: Bool {
     if case let .nominal(nominal) = self {
       return nominal.nominalTypeDecl.knownTypeKind == .bool
@@ -428,6 +440,8 @@ extension SwiftType {
         switch attribute.attributeName.trimmedDescription {
         case "escaping":
           functionType.isEscaping = true
+        case "autoclosure":
+          functionType.isAutoclosure = true
         case "Sendable":
           functionType.isSendable = true
         case "MainActor", "_Concurrency.MainActor":
@@ -548,6 +562,13 @@ extension SwiftType {
       self = knownTypes.optionalSugar(try SwiftType(optionalType.wrappedType, lookupContext: lookupContext))
 
     case .tupleType(let tupleType):
+      // `(T)` is `T` in parentheses, not a tuple: `((Item) -> Void)?` is an optional closure.
+      if tupleType.elements.count == 1, let element = tupleType.elements.first, element.firstName == nil,
+        element.ellipsis == nil
+      {
+        self = try SwiftType(element.type, lookupContext: lookupContext)
+        return
+      }
       self = try .tuple(
         tupleType.elements.map { element in
           SwiftTupleElement(
@@ -637,6 +658,8 @@ extension SwiftType {
         ?? lookupContext.symbolTable.lookupNestedTypealias(name.text, parent: parentDecl)
     } else if let module {
       typeDecl = lookupContext.moduleQualifiedLookup(name: name.text, in: module)
+    } else if name.tokenKind == .keyword(.Any) {
+      typeDecl = SwiftSyntheticTypes.anyDeclaration
     } else {
       guard let ident = Identifier(name) else {
         throw TypeTranslationError.unknown(originalType)

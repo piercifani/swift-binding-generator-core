@@ -28,6 +28,8 @@ public struct SwiftFunctionType: Equatable {
   public var isSendable: Bool = false
   /// Whether the function type is isolated to the main actor (`@MainActor`).
   public var isMainActorIsolated: Bool = false
+  /// `@autoclosure`: a call passes an expression of the result type, not a closure.
+  public var isAutoclosure: Bool = false
 
   public var effectSpecifiers: [SwiftEffectSpecifier] = []
 
@@ -88,8 +90,11 @@ extension SwiftFunctionType {
     self.isEscaping = isEscaping
     self.parameters = try node.parameters.map { param in
       let isInout = param.inoutKeyword != nil
+      // `(_ titles: [String]) -> Void` names its parameter `titles`, which the Java interface's keeps.
+      let name = param.secondName ?? param.firstName.flatMap { $0.tokenKind == .wildcard ? nil : $0 }
       return SwiftParameter(
         convention: isInout ? .inout : .byValue,
+        parameterName: name?.text,
         type: try SwiftType(param.type, lookupContext: lookupContext)
       )
     }
