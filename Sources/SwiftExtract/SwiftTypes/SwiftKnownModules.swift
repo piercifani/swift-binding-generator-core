@@ -35,7 +35,7 @@ public enum SwiftKnownModule: String {
   public var sourceFile: SourceFileSyntax {
     switch self {
     case .swift: swiftSourceFile
-    case .foundation: foundationEssentialsSourceFile
+    case .foundation: foundationSourceFile
     case .foundationEssentials: foundationEssentialsSourceFile
     }
   }
@@ -115,7 +115,7 @@ private let swiftSourceFile: SourceFileSyntax = """
   }
   """
 
-private let foundationEssentialsSourceFile: SourceFileSyntax = """
+private let foundationEssentialsSource = """
   public protocol DataProtocol {}
 
   public protocol LocalizedError: Error {}
@@ -147,12 +147,14 @@ private let foundationEssentialsSourceFile: SourceFileSyntax = """
   public struct Locale {}
 
   public struct TimeZone {}
+  """
+
+private let foundationEssentialsSourceFile: SourceFileSyntax = "\(raw: foundationEssentialsSource)"
+
+// On platforms other than Darwin, imports such as FoundationEssentials, FoundationNetworking, etc. are used,
+// so this file combines the files of the aforementioned modules with what only Foundation has.
+private let foundationSourceFile: SourceFileSyntax = """
+  \(raw: foundationEssentialsSource)
 
   public struct CGFloat {}
   """
-
-private var foundationSourceFile: SourceFileSyntax {
-  // On platforms other than Darwin, imports such as FoundationEssentials, FoundationNetworking, etc. are used,
-  // so this file should be created by combining the files of the aforementioned modules.
-  foundationEssentialsSourceFile
-}
