@@ -17,29 +17,29 @@ import SwiftParser
 import SwiftSyntax
 import Testing
 
-/// Extracts every declaration, except that the types in `unexported` aren't exported
-/// and extensions of unresolved types have no extractable members unless `mayExtractExtensions`.
-private struct ExportControlDecider: ExtractDecider {
-  var unexported: Set<String> = []
-  var mayExtractExtensions = true
+/// Extracts every declaration, except that the types in `unextracted` aren't extracted
+/// and members of extensions of unresolved types are extracted only if `extractsExtensionMembers`.
+private struct ExtractionControlDecider: ExtractDecider {
+  var unextracted: Set<String> = []
+  var extractsExtensionMembers = true
 
   func shouldExtract(decl: DeclSyntax, in parent: ExtractedNominalType?) -> Bool {
     true
   }
 
-  func isExported(_ type: SwiftNominalTypeDeclaration) -> Bool {
-    !unexported.contains(type.name)
+  func shouldExtract(decl: DeclSyntax, in extensionDecl: ExtensionDeclSyntax) -> Bool {
+    extractsExtensionMembers
   }
 
-  func mayExtractMembers(of extensionDecl: ExtensionDeclSyntax) -> Bool {
-    mayExtractExtensions
+  func isExtracted(_ type: SwiftNominalTypeDeclaration) -> Bool {
+    !unextracted.contains(type.name)
   }
 }
 
-@Suite("Export control")
-struct ExportControlSuite {
+@Suite("Extraction control")
+struct ExtractionControlSuite {
 
-  @Test func declarationsUsingUnexportedTypesAreSkipped() throws {
+  @Test func declarationsUsingUnextractedTypesAreSkipped() throws {
     let sink = CollectingDiagnosticsSink()
     let result = try SwiftAnalyzer.analyze(
       sources: [
@@ -68,7 +68,7 @@ struct ExportControlSuite {
         )
       ],
       moduleName: "Aquarium",
-      extractDecider: ExportControlDecider(unexported: ["Secret"]),
+      extractDecider: ExtractionControlDecider(unextracted: ["Secret"]),
       diagnosticsSink: sink
     )
 
@@ -81,10 +81,10 @@ struct ExportControlSuite {
     // reveal, hoard, whisper, Box.hidden, Holder.init(secret:), Holder.secret
     let reasons = sink.diagnostics.map { String(describing: $0.underlyingError!) }
     #expect(reasons.count == 6)
-    #expect(reasons.allSatisfy { $0 == "uses 'Secret', which is not exported" })
+    #expect(reasons.allSatisfy { $0 == "uses 'Secret', which is not extracted" })
   }
 
-  @Test func everythingExtractsWhenAllTypesAreExported() throws {
+  @Test func everythingExtractsWhenAllTypesAreExtracted() throws {
     let result = try SwiftAnalyzer.analyze(
       sources: [
         (
@@ -97,14 +97,14 @@ struct ExportControlSuite {
         )
       ],
       moduleName: "Aquarium",
-      extractDecider: ExportControlDecider()
+      extractDecider: ExtractionControlDecider()
     )
 
     #expect(Set(result.extractedGlobalFuncs.map(\.name)) == ["reveal", "hoard"])
   }
 
   @Test(arguments: [true, false])
-  func unresolvedExtensionIsReportedOnlyIfMembersMayBeExtracted(mayExtractExtensions: Bool) throws {
+  func unresolvedExtensionIsReportedOnlyIfMembersShouldBeExtracted(extractsExtensionMembers: Bool) throws {
     let sink = CollectingDiagnosticsSink()
     _ = try SwiftAnalyzer.analyze(
       sources: [
@@ -118,22 +118,24 @@ struct ExportControlSuite {
         )
       ],
       moduleName: "Aquarium",
-      extractDecider: ExportControlDecider(mayExtractExtensions: mayExtractExtensions),
+      extractDecider: ExtractionControlDecider(extractsExtensionMembers: extractsExtensionMembers),
       diagnosticsSink: sink
     )
 
     let skipped = sink.diagnostics.map(\.declarationName)
-    #expect(skipped == (mayExtractExtensions ? ["extension Missing"] : []))
+    #expect(skipped == (extractsExtensionMembers ? ["extension Missing"] : []))
   }
 
   @Test func knownModuleSourceIsRecognized() throws {
-    let int = try #require(SwiftKnownModule.swift.symbolTable.lookupTopLevelNominalType("Int"))
-    #expect(int.syntax.isFromKnownModuleSource)
-    let url = try #require(SwiftKnownModule.foundation.symbolTable.lookupTopLevelNominalType("URL"))
-    #expect(url.syntax.isFromKnownModuleSource)
+    let int = Syntax(fromProtocol: try #require(SwiftKnownModule.swift.symbolTable.lookupTopLevelNominalType("Int")).syntax)
+    #expect(SwiftKnownModule.swift.contains(int))
+    #expect(!SwiftKnownModule.foundation.contains(int))
+    let url = Syntax(fromProtocol: try #require(SwiftKnownModule.foundation.symbolTable.lookupTopLevelNominalType("URL")).syntax)
+    #expect(SwiftKnownModule.foundation.contains(url))
+    #expect(!SwiftKnownModule.swift.contains(url))
 
     let source = Parser.parse(source: "public struct Int {}")
-    #expect(!source.isFromKnownModuleSource)
-    #expect(!source.statements.first!.isFromKnownModuleSource)
+    #expect(!SwiftKnownModule.swift.contains(source))
+    #expect(!SwiftKnownModule.swift.contains(source.statements.first!))
   }
 }

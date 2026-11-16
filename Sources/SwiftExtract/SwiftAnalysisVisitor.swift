@@ -146,8 +146,12 @@ final class SwiftAnalysisVisitor {
       return
 
     case .unresolved:
-      guard analyzer.extractDecider.mayExtractMembers(of: node) else {
-        log.trace("Skip 'extension \(node.extendedType.trimmedDescription)': no member can be extracted")
+      let members = node.memberBlock.members
+      guard
+        members.isEmpty
+          || members.contains(where: { analyzer.extractDecider.shouldExtract(decl: $0.decl, in: node) })
+      else {
+        log.trace("Skip 'extension \(node.extendedType.trimmedDescription)': no member should be extracted")
         return
       }
       self.reportSkipped(
@@ -358,7 +362,7 @@ final class SwiftAnalysisVisitor {
         enclosingType: typeContext?.swiftType,
         lookupContext: analyzer.lookupContext,
       )
-      try checkTypesAreExported(signature)
+      try checkRequiredTypesAreExtracted(signature)
     } catch {
       self.reportSkipped(
         node,
@@ -416,7 +420,7 @@ final class SwiftAnalysisVisitor {
           enclosingType: typeContext.swiftType,
           lookupContext: analyzer.lookupContext,
         )
-        try checkTypesAreExported(signature)
+        try checkRequiredTypesAreExtracted(signature)
 
         let caseName = caseElement.name.text.unescapedSwiftName
         let caseFunction = ExtractedFunc(
@@ -520,7 +524,7 @@ final class SwiftAnalysisVisitor {
         enclosingType: typeContext.swiftType,
         lookupContext: analyzer.lookupContext,
       )
-      try checkTypesAreExported(signature)
+      try checkRequiredTypesAreExtracted(signature)
     } catch {
       self.reportSkipped(
         node,
@@ -639,7 +643,7 @@ final class SwiftAnalysisVisitor {
       log.warning("Not supported declaration type \(node.kind) while calling importAccessor!")
       return
     }
-    try checkTypesAreExported(signature)
+    try checkRequiredTypesAreExtracted(signature)
 
     let extracted = ExtractedFunc(
       module: analyzer.swiftModuleName,
@@ -901,25 +905,25 @@ final class SwiftAnalysisVisitor {
     return "\(message). \(hint)"
   }
 
-  /// A declaration uses a type that isn't exported, so the generated code would refer to a type that doesn't exist
-  struct UnexportedTypeError: Error, CustomStringConvertible {
+  /// A declaration uses a type that isn't extracted, so the generated code would refer to a type that doesn't exist
+  struct UnextractedTypeError: Error, CustomStringConvertible {
     let typeName: String
 
     var description: String {
-      "uses '\(typeName)', which is not exported"
+      "uses '\(typeName)', which is not extracted"
     }
   }
 
-  /// Throws `UnexportedTypeError` if a parameter or the result of `signature` uses a type that isn't exported
-  func checkTypesAreExported(_ signature: SwiftFunctionSignature) throws {
+  /// Throws `UnextractedTypeError` if a parameter or the result of `signature` uses a type that isn't extracted
+  func checkRequiredTypesAreExtracted(_ signature: SwiftFunctionSignature) throws {
     func check(_ type: SwiftType) throws {
       switch type {
       case .nominal(let nominal):
         for argument in nominal.genericArguments {
           try check(argument)
         }
-        guard analyzer.extractDecider.isExported(nominal.nominalTypeDecl) else {
-          throw UnexportedTypeError(typeName: nominal.nominalTypeDecl.qualifiedName)
+        guard analyzer.extractDecider.isExtracted(nominal.nominalTypeDecl) else {
+          throw UnextractedTypeError(typeName: nominal.nominalTypeDecl.qualifiedName)
         }
       case .tuple(let elements):
         for element in elements {
